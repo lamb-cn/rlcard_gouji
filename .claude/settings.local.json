@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python)",
+      "Bash(python -m unittest tests.games.test_gouji_judger -v)",
+      "Bash(python -m unittest tests.games.test_gouji_buy_phase -v)",
+      "Bash(python -m unittest tests.games.test_gouji_round -v)"
+    ]
+  }
+}

@@ -5,7 +5,7 @@ from typing import Optional
 
 from .utils import (
     RANK_INDEX, RANK_STR, ATTACH_RANKS, WANG_RANKS,
-    is_attach_card, get_rank_index, cards2str, is_lianbang,
+    is_attach_card, get_rank_index, cards2str, is_duimen,
 )
 
 
@@ -47,8 +47,12 @@ class Play:
         if self.core_rank == RANK_INDEX['A'] and eff >= 2: return True
         if self.core_rank == RANK_INDEX['2'] and eff >= 1: return True
         return False
-
-
+    
+    def is_pure_gouji(self)->bool:
+        """是否纯够级牌：够级牌是否贴2挂花。"""
+        if self.is_gouji() and self.attach_2==0 and self.attach_wangs_total()==0: return True
+        return False
+    
 PASS_PLAY = Play(core_rank=-1, core_count=0, attach_2=0,
                  attach_BJ=0, attach_RJ=0, attach_Y=0, is_pass=True)
 
@@ -60,20 +64,14 @@ class GoujiJudger:
     def parse_play(cards: list) -> Play:
         """将 Card 列表解析成 Play。
 
-        【纯core 规则】所有 rank 相同 → 纯 core，无 attach。
-        【混合 规则】否则按 王/鹰 → attach；2 → attach_2；其余必须同 rank → core。
+        规则顺序：
+        1. 空列表：过牌
+        2. 只有王/鹰：core_rank 取其中最小的王/鹰，王/鹰数量记入 attach
+        3. 只有 2 和王/鹰，或者只有 2：core_rank 为 2，2 的数量记入 attach_2
+        4. 其他情况：王/鹰 → attach；2 → attach_2；其余必须同 rank → core
         """
-        if not cards:
+        if len(cards) == 0:
             return PASS_PLAY
-
-        ranks_set = set(c.rank for c in cards)
-        if len(ranks_set) == 1:
-            only_rank = next(iter(ranks_set))
-            return Play(
-                core_rank=RANK_INDEX[only_rank],
-                core_count=len(cards),
-                attach_2=0, attach_BJ=0, attach_RJ=0, attach_Y=0,
-            )
 
         BJs = [c for c in cards if c.rank == 'BJ']
         RJs = [c for c in cards if c.rank == 'RJ']
@@ -81,21 +79,48 @@ class GoujiJudger:
         twos = [c for c in cards if c.rank == '2']
         others = [c for c in cards if c.rank not in {'2', 'BJ', 'RJ', 'Y'}]
 
-        if not others:
-            if twos:
-                return Play(
-                    core_rank=RANK_INDEX['2'],
-                    core_count=len(twos),
-                    attach_2=0,
-                    attach_BJ=len(BJs), attach_RJ=len(RJs), attach_Y=len(Ys),
-                )
-            raise ValueError(
-                f'混合纯王/鹰组合暂不支持: {[c.rank for c in cards]}')
+        has_wang = bool(BJs or RJs or Ys)
 
+        # 规则 2：只有王/鹰，包括纯同种王/鹰、混合王/鹰
+        if not others and not twos and has_wang:
+            wang_ranks = []
+
+            if BJs:
+                wang_ranks.append(RANK_INDEX['BJ'])
+            if RJs:
+                wang_ranks.append(RANK_INDEX['RJ'])
+            if Ys:
+                wang_ranks.append(RANK_INDEX['Y'])
+
+            return Play(
+                core_rank=min(wang_ranks),
+                core_count=0,
+                attach_2=0,
+                attach_BJ=len(BJs),
+                attach_RJ=len(RJs),
+                attach_Y=len(Ys),
+            )
+
+        # 规则 3：只有 2，或者只有 2 + 王/鹰
+        if not others and twos:
+            return Play(
+                core_rank=RANK_INDEX['2'],
+                core_count=0,
+                attach_2=len(twos),
+                attach_BJ=len(BJs),
+                attach_RJ=len(RJs),
+                attach_Y=len(Ys),
+            )
+
+        # 规则 4：其他情况
+        # 此时必须存在普通牌，且普通牌只能有一种 rank
         others_ranks = set(c.rank for c in others)
+
         if len(others_ranks) > 1:
             raise ValueError(
-                f'core 含多种点数: {[c.rank for c in others]}')
+                f'core 含多种点数: {[c.rank for c in others]}'
+            )
+
         core_rank_str = next(iter(others_ranks))
 
         return Play(
@@ -176,40 +201,113 @@ class GoujiJudger:
         if len(cur_wangs) > len(new_wangs):
             return False
         for i in range(len(cur_wangs)):
-            if new_wangs[i] < cur_wangs[i]:
+            if new_wangs[i] <= cur_wangs[i]:
                 return False
 
         # core_rank 严格更大
         return new_play.core_rank > current_play.core_rank
 
     @staticmethod
-    def judge_game(players) -> int:
-        """返回赢家队伍编号（0或1），未结束返 -1。"""
-        for p in players:
-            if len(p.hand) == 0:
-                return p.team_id
-        return -1
+    def judge_game(players, finish_order: list) -> bool:
+        """判断游戏是否已经结束。
+
+        结束条件：
+        场上剩下没走的人是一队。
+        """
+        num_players = len(players)
+        finished_set = set(finish_order)
+
+        remaining = [
+            player_id
+            for player_id in range(num_players)
+            if player_id not in finished_set
+        ]
+
+        if not remaining:
+            return True
+
+        remaining_teams = [
+            players[player_id].team_id
+            for player_id in remaining
+        ]
+
+        return len(set(remaining_teams)) == 1
+
 
     @staticmethod
-    def judge_payoffs(winner_team: int, num_players: int = 6):
-        """6人收益数组：赢家队伍 +1，输家 -1。"""
-        import numpy as np
-        if winner_team < 0:
-            return np.zeros(num_players, dtype=np.float32)
-        payoffs = np.full(num_players, -1.0, dtype=np.float32)
-        for i in range(num_players):
-            if i % 2 == winner_team:
-                payoffs[i] = 1.0
-        return payoffs
+    def judge_payoffs(players, finish_order: list) -> list:
+        """根据走牌顺序结算每个玩家收益。
 
+        规则：
+        第 1 个走：所在队 +4
+        第 2 个走：所在队 +2
+        第 3 / 4 个走：不加分
+        第 5 个走：所在队 -2
+        第 6 个走：所在队 -4
+
+        如果场上剩下没走的人是一队，则把剩余名次的扣分直接结算到该队。
+
+        每个玩家最终得分 = 所在队伍总分 / 3。
+
+        特殊规则：
+        如果先走的三个人是同一队，则该队每人 +12，另一队每人 -12。
+        """
+        num_players = len(players)
+
+        if not GoujiJudger.judge_game(players, finish_order):
+            return [0.0 for _ in range(num_players)]
+
+        # 特殊规则：先走的三个人是同一队
+        if len(finish_order) >= 3:
+            first_three_teams = [
+                players[player_id].team_id
+                for player_id in finish_order[:3]
+            ]
+
+            if len(set(first_three_teams)) == 1:
+                winning_team = first_three_teams[0]
+
+                return [
+                    12.0 if player.team_id == winning_team else -12.0
+                    for player in players
+                ]
+
+        rank_scores = [4, 2, 0, 0, -2, -4]
+
+        team_scores = {}
+        for player in players:
+            team_scores.setdefault(player.team_id, 0)
+
+        finished_set = set(finish_order)
+
+        remaining = [
+            player_id
+            for player_id in range(num_players)
+            if player_id not in finished_set
+        ]
+
+        # 游戏结束时，remaining 必然是一队。
+        # 剩余玩家的具体顺序不重要，因为剩余扣分都结算到同一队。
+        final_order = list(finish_order) + remaining
+
+        for rank_index, player_id in enumerate(final_order):
+            team_id = players[player_id].team_id
+            team_scores[team_id] += rank_scores[rank_index]
+
+        return [
+            team_scores[player.team_id] / 3
+            for player in players
+        ]
     @staticmethod
     def playable_cards_from_hand(hand: list, last_play: Optional[Play],
                                   player_id: int = 0,
-                                  last_player_id: Optional[int] = None) -> set:
+                                  last_player_id: Optional[int] = None,
+                                  player_status: Optional[list] = None) -> set:
         """枚举所有合法出牌字符串集合（含 'pass'/'yield' 当合适）。
 
         last_play=None：本轮第一手，枚举所有 parse_play 成功的组合（应用 3/4 约束）。
-        last_play 非空：只保留能 can_beat 的组合 + 'pass'；上家是对家时 + 'yield'。
+        last_play 非空：只保留能 can_beat 的组合 + 'pass'。
+        yield：对家出牌且其后两人均过牌时可选。
         """
         playable = set()
 
@@ -284,10 +382,13 @@ class GoujiJudger:
         # ── pass / yield ──
         if last_play is not None and not last_play.is_pass:
             playable.add('pass')
-            # yield: 上家是同队
+            # yield: 对家出牌且对家后两人均过牌
             if (last_player_id is not None
                     and last_player_id != player_id
-                    and is_lianbang(last_player_id, player_id)):
+                    and is_duimen(last_player_id, player_id)
+                    and player_status is not None
+                    and player_status[(last_player_id - 1) % 6] == 3   # PASSED
+                    and player_status[(last_player_id - 2) % 6] == 3):  # PASSED
                 playable.add('yield')
 
         return playable

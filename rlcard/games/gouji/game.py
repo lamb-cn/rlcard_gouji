@@ -36,14 +36,16 @@ class GoujiGame:
     def get_player_id(self):
         return self.round.current_player_id
 
-    def is_over(self):
-        return self.winner_team >= 0
-
     # ── 初始化 ────────────────────────────────────────────────────
 
     def init_game(self):
         """发牌 → 买3 → 买4 → 初始化轮次。"""
+        # 兼容旧字段；新收益结算不再依赖 winner_team
         self.winner_team = -1
+
+        # 新增：按走牌顺序记录玩家 id
+        # 例如 [0, 2, 4] 表示 0 第一个走，2 第二个走，4 第三个走
+        self.finish_order = []
 
         self.players = [GoujiPlayer(i) for i in range(NUM_PLAYERS)]
         self.dealer = GoujiDealer(self.np_random)
@@ -79,25 +81,39 @@ class GoujiGame:
             # 从手牌中找出对应的 Card 对象
             cards = self._pick_cards_for_action(player.hand, action)
             parsed_play = GoujiJudger.parse_play(cards)
+
             # 移除手牌、记录已出
             player.remove_cards(cards)
             player.played_history.extend(cards)
+
+            # 新增：如果该玩家出完牌，记录走牌顺序
+            if len(player.hand) == 0 and pid not in self.finish_order:
+                self.finish_order.append(pid)
+
             # 更新已出数组（用 rank 计数，归一化）
             for c in cards:
                 ri = RANK_INDEX[c.rank]
                 from .utils import RANK_MAX_COUNT, RANK_STR
                 self._played_arrays[pid][ri] += (
-                    1.0 / RANK_MAX_COUNT[RANK_STR[ri]])
+                    1.0 / RANK_MAX_COUNT[RANK_STR[ri]]
+                )
 
         round_over = self.round.proceed(action, parsed_play)
 
-        # 检查游戏结束（手牌清空）
-        winner = GoujiJudger.judge_game(self.players)
-        if winner >= 0:
-            self.winner_team = winner
-
+        # 加入 finish_order 后，终局由 self.is_over() 判断。
+        # 暂不处理“已经走掉的玩家不应该再被轮到”的问题。
         if round_over and not self.is_over():
             self.round.reset_for_next_round()
+
+        # 兼容旧字段：如果已经结束，可以根据 payoffs 推断 winner_team
+        if self.is_over() and self.winner_team < 0:
+            payoffs = self.get_payoffs()
+            max_payoff = max(payoffs)
+            if max_payoff > 0:
+                for i, payoff in enumerate(payoffs):
+                    if payoff == max_payoff:
+                        self.winner_team = self.players[i].team_id
+                        break
 
         next_pid = self.round.current_player_id
         state = self.get_state(next_pid)
@@ -118,17 +134,23 @@ class GoujiGame:
         last_play = self.round.last_play
         if last_play is None or last_play.is_pass:
             lp_meta = {
-                'core_rank': -1, 'core_count': 0,
-                'attach_2': 0, 'attach_wangs_total': 0, 'is_gouji': False,
+                'core_rank': -1,
+                'core_count': 0,
+                'attach_2': 0,
+                'attach_wangs_total': 0,
+                'is_gouji': False,
             }
             lp_arr = np.zeros(16, dtype=np.float32)
         else:
             from .utils import RANK_MAX_COUNT, RANK_STR
             lp_arr = np.zeros(16, dtype=np.float32)
-            lp_arr[last_play.core_rank] += (
-                last_play.core_count
-                / RANK_MAX_COUNT[RANK_STR[last_play.core_rank]]
-            ) if last_play.core_rank >= 0 else 0
+
+            if last_play.core_rank >= 0:
+                lp_arr[last_play.core_rank] += (
+                    last_play.core_count
+                    / RANK_MAX_COUNT[RANK_STR[last_play.core_rank]]
+                )
+
             lp_meta = {
                 'core_rank': last_play.core_rank,
                 'core_count': last_play.core_count,
@@ -143,11 +165,14 @@ class GoujiGame:
             last_play=(last_play if (last_play and not last_play.is_pass) else None),
             player_id=player_id,
             last_player_id=self.round.last_player_id,
+            player_status=self.round.player_status,
         )
+
         # leader 不能 pass/yield
         if self.round.is_leading():
             actions.discard('pass')
             actions.discard('yield')
+
         # 保证至少有一个动作（极端情况下强制 pass）
         if not actions:
             actions = {'pass'}
@@ -155,18 +180,43 @@ class GoujiGame:
         return {
             'current_hand_arr': hand_to_normalized_array(p.hand),
             'others_played_arr': others_played,
-            'num_cards_left': [len(self.players[i].hand) for i in range(NUM_PLAYERS)],
+            'num_cards_left': [
+                len(self.players[i].hand)
+                for i in range(NUM_PLAYERS)
+            ],
             'last_play_array': lp_arr,
             'last_play_meta': lp_meta,
             'last_player_id': self.round.last_player_id,
-            'player_round_status': [int(s) for s in self.round.player_status],
+            'player_round_status': [
+                int(s) for s in self.round.player_status
+            ],
             'actions': actions,
             'self': player_id,
             'team_id': team_id(player_id),
+
+            # 新增：把走牌顺序暴露在 raw_state 里
+            'finish_order': list(self.finish_order),
+            'finished': [
+                i in self.finish_order
+                for i in range(NUM_PLAYERS)
+            ],
         }
 
+    # ── 终局与收益 ───────────────────────────────────────────────
+
+    def is_over(self):
+        """判断游戏是否结束。"""
+        return GoujiJudger.judge_game(
+            self.players,
+            self.finish_order,
+        )
+
     def get_payoffs(self):
-        return GoujiJudger.judge_payoffs(self.winner_team, NUM_PLAYERS)
+        """返回每个玩家的收益。"""
+        return GoujiJudger.judge_payoffs(
+            self.players,
+            self.finish_order,
+        )
 
     # ── 工具 ─────────────────────────────────────────────────────
 
@@ -181,6 +231,7 @@ class GoujiGame:
         remaining = list(hand)
         picked = []
         rank_need = Counter(ranks)
+
         for rank, count in rank_need.items():
             got = 0
             for c in remaining[:]:
@@ -188,7 +239,10 @@ class GoujiGame:
                     picked.append(c)
                     remaining.remove(c)
                     got += 1
+
             if got < count:
                 raise ValueError(
-                    f'手牌不足: 需要 {count} 张 {rank}，手牌只有 {got} 张')
+                    f'手牌不足: 需要 {count} 张 {rank}，手牌只有 {got} 张'
+                )
+
         return picked

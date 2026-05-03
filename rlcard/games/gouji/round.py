@@ -50,7 +50,7 @@ class GoujiRound:
             self.player_status[pid] = PlayerRoundStatus.YIELDED
         else:
             # 出牌
-            assert parsed_play is not None and not parsed_play.is_pass
+            assert parsed_play is not None and not parsed_play.is_pass()
             self.last_play = parsed_play
             self.last_player_id = pid
             self.greater_player_id = pid

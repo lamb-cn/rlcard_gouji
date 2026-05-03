@@ -5,7 +5,7 @@ import numpy as np
 
 from rlcard.envs import Env
 from rlcard.games.gouji.game import GoujiGame
-from rlcard.games.gouji.utils import NUM_RANKS
+from rlcard.games.gouji.utils import NUM_RANKS, RANK_MAX_COUNT, RANK_STR
 
 OBS_DIM = 135   # 16+80+6+16+5+6+6
 
@@ -33,7 +33,10 @@ class GoujiEnv(Env):
     def _extract_state(self, state: dict) -> dict:
         obs = np.zeros(OBS_DIM, dtype=np.float32)
 
-        obs[0:16] = state['current_hand_arr']
+        # 手牌归一化：16维 int32 → float32 / RANK_MAX_COUNT
+        hand = state['current_hand_arr']
+        for i in range(NUM_RANKS):
+            obs[i] = float(hand[i]) / RANK_MAX_COUNT[RANK_STR[i]]
 
         for i, arr in enumerate(state['others_played_arr']):
             obs[16 + i*16: 16 + (i+1)*16] = arr

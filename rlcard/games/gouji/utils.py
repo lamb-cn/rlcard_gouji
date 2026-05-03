@@ -1,12 +1,16 @@
 """够级游戏工具：牌的编码、常量、座位关系。"""
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from .judger import Play
 
 
 RANK_STR = ['3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A',
             '2', 'BJ', 'RJ', 'Y']
 RANK_INDEX = {r: i for i, r in enumerate(RANK_STR)}
-
-SUIT_STR = ['S', 'H', 'D', 'C']
 
 ATTACH_RANKS = {'2', 'BJ', 'RJ', 'Y'}
 WANG_RANKS = {'BJ', 'RJ', 'Y'}
@@ -14,7 +18,6 @@ WANG_RANKS = {'BJ', 'RJ', 'Y'}
 NUM_RANKS = 16
 NUM_PLAYERS = 6
 HAND_SIZE = 52
-TOTAL_CARDS = 312
 
 RANK_MAX_COUNT = {
     '3': 6,
@@ -24,45 +27,62 @@ RANK_MAX_COUNT = {
 }
 
 
-def get_rank_index(card) -> int:
-    return RANK_INDEX[card.rank]
-
-
-def is_attach_card(card) -> bool:
-    return card.rank in ATTACH_RANKS
-
-
-def is_wang(card) -> bool:
-    return card.rank in WANG_RANKS
-
-
-def hand_to_rank_array(hand: list) -> np.ndarray:
-    """手牌 → 16维 rank 计数向量（不归一化）。"""
-    arr = np.zeros(NUM_RANKS, dtype=np.int32)
-    for card in hand:
-        arr[RANK_INDEX[card.rank]] += 1
-    return arr
-
-
-def hand_to_normalized_array(hand: list) -> np.ndarray:
-    """手牌 → 16维 rank 计数向量（除以该 rank 的最大可能数）。"""
-    arr = hand_to_rank_array(hand).astype(np.float32)
+def hand_to_normalized_array(hand: np.ndarray) -> np.ndarray:
+    """16维计数向量 → 归一化（除以该 rank 的最大可能数）。"""
+    arr = hand.astype(np.float32)
     for i, rank in enumerate(RANK_STR):
         arr[i] /= RANK_MAX_COUNT[rank]
     return arr
 
 
-def cards2str(cards: list) -> str:
-    """Card 列表 → 唯一字符串表示，按 rank 升序排列，'|' 分隔。"""
-    sorted_cards = sorted(cards, key=get_rank_index)
-    return '|'.join(c.rank for c in sorted_cards)
+def ranks_to_str(ranks: list) -> str:
+    """rank 字符串列表 → 排序后的 '|' 分隔字符串。"""
+    return '|'.join(sorted(ranks, key=lambda r: RANK_INDEX[r]))
 
 
 def str2ranks(action_str: str) -> list:
-    """动作字符串 → rank 列表，例 '7|7|7' → ['7','7','7']。"""
+    """动作字符串 → rank 列表，例 '7|7|BJ' → ['7','7','BJ']。"""
     if action_str in ('pass', 'yield', ''):
         return []
     return action_str.split('|')
+
+
+# ── str ↔ Play 转换 ──
+
+def str_to_play(action_str: str) -> 'Play':
+    """'7|7|BJ' → Play; 'pass'/'yield' → PASS_PLAY"""
+    from .judger import GoujiJudger, PASS_PLAY
+    if action_str in ('pass', 'yield', ''):
+        return PASS_PLAY
+    ranks = action_str.split('|')
+    return GoujiJudger.parse_play(ranks)
+
+
+def play_to_str(play: 'Play') -> str:
+    """Play → 排序后的 '|' 分隔字符串"""
+    if play.core_rank == -1:
+        return 'pass'
+    parts = []
+    parts.extend([RANK_STR[play.core_rank]] * play.core_count)
+    parts.extend(['2'] * play.attach_2)
+    parts.extend(['BJ'] * play.attach_BJ)
+    parts.extend(['RJ'] * play.attach_RJ)
+    parts.extend(['Y'] * play.attach_Y)
+    parts.sort(key=lambda r: RANK_INDEX[r])
+    return '|'.join(parts)
+
+
+def play_to_ranks(play: 'Play') -> list:
+    """Play → rank 字符串列表"""
+    if play.core_rank == -1:
+        return []
+    parts = []
+    parts.extend([RANK_STR[play.core_rank]] * play.core_count)
+    parts.extend(['2'] * play.attach_2)
+    parts.extend(['BJ'] * play.attach_BJ)
+    parts.extend(['RJ'] * play.attach_RJ)
+    parts.extend(['Y'] * play.attach_Y)
+    return parts
 
 
 # ───────────── 座位关系（6 人，0,2,4 vs 1,3,5）─────────────
@@ -87,9 +107,9 @@ def duimen_of(player_id: int) -> int:
 
 
 def buyer_priority_sellers(buyer: int) -> list:
-    """卖家优先级：对门 → 联邦 → 上下家。"""
+    """卖家优先级五维向量：[对家, 联邦1, 联邦2, 上家, 下家]."""
     return [
-        (buyer + 3) % 6,                    # 对门
-        (buyer + 2) % 6, (buyer + 4) % 6,   # 联邦
-        (buyer + 1) % 6, (buyer - 1) % 6,   # 上下家
+        (buyer + 3) % 6,                    # 0: 对门
+        (buyer + 2) % 6, (buyer + 4) % 6,   # 1,2: 联邦
+        (buyer + 1) % 6, (buyer - 1) % 6,   # 3,4: 上下家
     ]
